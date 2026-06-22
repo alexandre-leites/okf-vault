@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: okf-postgres
+    environment:
+      POSTGRES_USER: okfvault
+      POSTGRES_PASSWORD: okfvault
+      POSTGRES_DB: okf_vault
+    ports:
+      - "5432:5432"
+    volumes:
+      - okf-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U okfvault -d okf_vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - okf-net
+
+  vault:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: okf-vault
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://okfvault:okfvault@postgres:5432/okf_vault
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      LOG_LEVEL: info
+      LOG_PRETTY: "false"
+      CORS_ORIGINS: "*"
+      API_KEY: ""
+      MAX_BODY_SIZE: "1048576"
+      RATE_LIMIT_RPS: "100"
+    networks:
+      - okf-net
+
+networks:
+  okf-net:
+
+volumes:
+  okf-pgdata:
