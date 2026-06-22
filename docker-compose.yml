@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: okf-postgres
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-okfvault}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-okfvault}"
+      POSTGRES_DB: "${POSTGRES_DB:-okf_vault}"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - okf-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-okfvault} -d ${POSTGRES_DB:-okf_vault}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - okf-net
+
+  vault:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: okf-vault
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # `serve --migrate` (the image default CMD) runs pending migrations before
+    # starting the server on every start AND restart.
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    environment:
+      # ENV is one of three config sources (precedence: CLI > ENV > FILE > default).
+      # Each reads from the host env / .env file and falls back to a default.
+      DATABASE_URL: "${DATABASE_URL:-postgres://${POSTGRES_USER:-okfvault}:${POSTGRES_PASSWORD:-okfvault}@postgres:5432/${POSTGRES_DB:-okf_vault}}"
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-3000}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_PRETTY: "${LOG_PRETTY:-false}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      API_KEY: "${API_KEY:-}"
+      MAX_BODY_SIZE: "${MAX_BODY_SIZE:-1048576}"
+      RATE_LIMIT_RPS: "${RATE_LIMIT_RPS:-100}"
+      # stdio + Streamable HTTP /mcp both enabled; use "http" for HTTP only.
+      MCP_TRANSPORT: "${MCP_TRANSPORT:-both}"
+      BUNDLE_STORAGE_ENABLED: "${BUNDLE_STORAGE_ENABLED:-false}"
+      BUNDLE_STORAGE_PATH: "${BUNDLE_STORAGE_PATH:-}"
+      # FILE source: uncomment and mount a YAML config below to use it.
+      # OKFVAULT_CONFIG: /config/okfvault.yaml
+    # volumes:
+    #   - ./okfvault.yaml:/config/okfvault.yaml:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:'+(process.env.PORT||'3000')+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - okf-net
+
+networks:
+  okf-net:
+
+volumes:
+  okf-pgdata:

@@ -1,0 +1,44 @@
+# OKF Vault configuration
+#
+# Precedence: CLI flags > OKFVAULT_* env vars > this file > built-in defaults
+#
+# All keys require the OKFVAULT_ prefix when set via env — bare names like
+# PORT or DATABASE_URL are intentionally NOT recognized to avoid collisions
+# with CI/Docker/orchestrator environment variables.
+#
+#
+# All keys are optional — defaults apply when omitted.
+
+# PostgreSQL connection string
+DATABASE_URL: postgres://okfvault:okfvault@localhost:5432/okf_vault
+
+# Separate test database — required for integration tests. No fallback to
+# DATABASE_URL, so you must set this explicitly to run integration tests.
+# DATABASE_TEST_URL: postgres://okfvault:okfvault@localhost:5432/okf_vault_test
+
+# HTTP server
+HOST: 0.0.0.0
+PORT: 3000
+
+# Logging
+LOG_LEVEL: info # fatal, error, warn, info, debug, trace, silent
+LOG_PRETTY: false # pretty-print for development
+
+# CORS — comma-separated origins or "*" for all
+CORS_ORIGINS: ""
+
+# Bearer token auth — empty string disables
+API_KEY: ""
+
+# Max request body in bytes (default 1 MB)
+MAX_BODY_SIZE: 1048576
+
+# Rate limit: requests per second per IP
+RATE_LIMIT_RPS: 100
+
+# MCP transport: stdio, http, sse, or both
+MCP_TRANSPORT: both
+
+# Filesystem bundle mirror — keeps an up-to-date OKF markdown copy on disk
+# BUNDLE_STORAGE_ENABLED: true
+# BUNDLE_STORAGE_PATH: /data/okf-vault

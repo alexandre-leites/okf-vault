@@ -1,0 +1,26 @@
+{
+  "name": "okf-vault",
+  "private": true,
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "server": "npm run -w server",
+    "build": "npm run build -w server",
+    "dev": "npm run dev -w server",
+    "start": "npm run start -w server",
+    "typecheck": "npm run typecheck -w server",
+    "lint": "npm run lint -w server",
+    "lint:fix": "npm run lint:fix -w server",
+    "format": "npm run format -w server",
+    "format:check": "npm run format:check -w server",
+    "test": "npm run test -w server",
+    "test:watch": "npm run test:watch -w server",
+    "test:coverage": "npm run test:coverage -w server",
+    "db:generate": "npm run db:generate -w server",
+    "db:migrate": "npm run db:migrate -w server"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

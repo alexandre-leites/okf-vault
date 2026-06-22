@@ -1,0 +1,91 @@
+{
+  "name": "okf-vault",
+  "version": "0.1.0",
+  "description": "A pluggable Model Context Protocol (MCP) server and headless CLI for the Open Knowledge Format (OKF).",
+  "keywords": [
+    "okf",
+    "mcp",
+    "model-context-protocol",
+    "knowledge",
+    "markdown",
+    "cli"
+  ],
+  "license": "Apache-2.0",
+  "author": "Alexandre Leites",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexandre-leites/okf-vault"
+  },
+  "bugs": {
+    "url": "https://github.com/alexandre-leites/okf-vault/issues"
+  },
+  "homepage": "https://github.com/alexandre-leites/okf-vault",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "okfvault": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "drizzle"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node dist/cli.js migrate",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.5",
+    "@hono/swagger-ui": "^0.6.1",
+    "@hono/zod-openapi": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.26",
+    "js-yaml": "^4.2.0",
+    "pino": "^10.3.1",
+    "postgres": "^3.4.7",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.13.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^10.5.0",
+    "prettier": "^3.8.4",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^4.1.9"
+  }
+}
