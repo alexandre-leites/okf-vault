@@ -6,8 +6,30 @@ import type { Database } from "../db/client.js";
 import { createServices } from "../services/factory.js";
 import { serializeConcept } from "../services/okf-document.js";
 import { pathsBySubtree } from "../services/paths-by-subtree.js";
+import { conceptTypeGuide } from "../domain/concept-types.js";
+import { json, runTool, resolveConceptAddress, toToolError } from "./tool-helpers.js";
+import { SearchQuerySyntaxError } from "../services/search-query.js";
 import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
+
+const TYPE_FIELD_DESCRIPTION = [
+  "The concept's category. Choose the single best-fitting type from the catalog below",
+  "(custom types are allowed but discouraged):",
+  "",
+  conceptTypeGuide(),
+].join("\n");
+
+const BUNDLE_NAMING_GUIDANCE =
+  "Bundle naming: use 'global' for knowledge NOT tied to a specific project (user preferences, " +
+  "cross-cutting standards, general facts). For project-specific knowledge, use the git repository " +
+  "name or project name as the bundle (e.g. 'okf-vault'). The 'global' bundle always exists.";
+
+const BUNDLE_DESC =
+  "Root bundle slug. Use 'global' for cross-project knowledge, or the git repo / project name for " +
+  "project-specific knowledge (e.g. 'okf-vault'). May also be a nested address like 'okf-vault/api'.";
+const PATH_DESC =
+  "Concept path within the bundle, slash-separated, no leading slash, '.md' optional " +
+  "(e.g. 'preferences/formatting'). Intermediate directories are auto-created on write.";
 
 export interface ServeOptions {
   readonly config: Config;
@@ -16,14 +38,12 @@ export interface ServeOptions {
   readonly onShutdown?: () => Promise<void>;
 }
 
-function json(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
-}
-
 /**
- * Builds the MCP server exposing OKF bundles and concepts as Tools. The tool
- * surface mirrors the REST API so an agent can discover (list/index/search)
- * and mutate (create/update/delete) without falling back to raw file paths.
+ * Builds the MCP server exposing OKF bundles and concepts as Tools. Concepts
+ * live in named bundles: use the reserved `global` bundle for cross-project
+ * knowledge, or the git repo / project name for project-specific knowledge.
+ * The agent discovers (list/index/search) and mutates (upsert) without ever
+ * touching raw file paths.
  */
 export function createMcpServer(db: Database, log: Logger): McpServer {
   const svc = createServices(db);
@@ -33,52 +53,75 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
   const indexer = svc.indexService;
   const conceptRepo = svc.conceptRepo;
 
+  // The reserved `global` bundle must always exist.
+  void bundles.ensureGlobal().catch((err: unknown) => log.error({ err }, "ensureGlobal failed"));
+
   const server = new McpServer({ name: "okf-vault", version: "0.2.0" });
 
   server.registerTool(
     "okf_bundle_list",
-    { title: "List bundles", description: "List all knowledge bundles.", inputSchema: {} },
-    async () => {
-      log.debug("MCP okf_bundle_list");
-      const rows = await bundles.list();
-      return json(rows.map((b) => ({ slug: b.slug, title: b.title, description: b.description })));
+    {
+      title: "List bundles",
+      description:
+        "List all top-level knowledge bundles (slug, title, description). Use this to discover " +
+        "which bundles exist before indexing or searching.",
+      inputSchema: {},
     },
+    async () =>
+      runTool(async () => {
+        log.debug("MCP okf_bundle_list");
+        const rows = await bundles.list();
+        return json(
+          rows.map((b) => ({ slug: b.slug, title: b.title, description: b.description })),
+        );
+      }),
   );
 
   server.registerTool(
     "okf_bundle_create",
     {
       title: "Create bundle",
-      description: "Create a knowledge bundle identified by a slug.",
+      description:
+        "Create a top-level knowledge bundle (a namespace for related concepts). Note: writing a " +
+        "concept with okf_concept_upsert auto-creates intermediate directories, so you rarely need " +
+        "this unless seeding a brand-new root namespace.",
       inputSchema: {
-        slug: z.string().min(1).max(200),
-        title: z.string().max(500).optional(),
-        description: z.string().max(2000).optional(),
+        slug: z
+          .string()
+          .min(1)
+          .max(200)
+          .describe("Unique bundle identifier, lowercase-kebab recommended (e.g. 'memory')."),
+        title: z.string().max(500).optional().describe("Human-readable display title."),
+        description: z.string().max(2000).optional().describe("One-line summary of the bundle."),
       },
     },
-    async ({ slug, title, description }) => {
-      log.debug({ slug }, "MCP okf_bundle_create");
-      const b = await bundles.create({
-        slug,
-        ...(title !== undefined ? { title } : {}),
-        ...(description !== undefined ? { description } : {}),
-      });
-      return json({ slug: b.slug, title: b.title, description: b.description });
-    },
+    async ({ slug, title, description }) =>
+      runTool(async () => {
+        log.debug({ slug }, "MCP okf_bundle_create");
+        const b = await bundles.create({
+          slug,
+          ...(title !== undefined ? { title } : {}),
+          ...(description !== undefined ? { description } : {}),
+        });
+        return json({ slug: b.slug, title: b.title, description: b.description });
+      }),
   );
 
   server.registerTool(
     "okf_bundle_delete",
     {
       title: "Delete bundle",
-      description: "Soft-delete a bundle and its concepts.",
-      inputSchema: { slug: z.string() },
+      description:
+        "DESTRUCTIVE. Soft-delete a bundle and ALL of its concepts. Avoid in the append/update " +
+        "memory model — prefer updating concepts via okf_concept_upsert. Use only on explicit request.",
+      inputSchema: { slug: z.string().describe("Slug of the bundle to soft-delete.") },
     },
-    async ({ slug }) => {
-      log.debug({ slug }, "MCP okf_bundle_delete");
-      await bundles.delete(slug);
-      return json({ deleted: slug });
-    },
+    async ({ slug }) =>
+      runTool(async () => {
+        log.debug({ slug }, "MCP okf_bundle_delete");
+        await bundles.delete(slug);
+        return json({ status: "success", deleted: slug });
+      }),
   );
 
   server.registerTool(
@@ -86,50 +129,146 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     {
       title: "Bundle index",
       description:
-        "Directory listing for progressive disclosure. Optionally scope to a subdirectory path.",
-      inputSchema: { bundle: z.string(), path: z.string().optional() },
+        "List the directory structure of a bundle. Use this when you need to understand the " +
+        "hierarchy of stored concepts before searching. Returns a tree of titles/links, not bodies.",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z
+          .string()
+          .optional()
+          .describe("Optional sub-directory to scope the listing (e.g. 'projects/api')."),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_bundle_index");
-      const segments = [bundle, ...(path ?? "").split("/")].filter(Boolean);
-      return json(await indexer.index(segments));
-    },
+    async ({ bundle, path }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_bundle_index");
+        const segments = [bundle, ...(path ?? "").split("/")].filter(Boolean);
+        return json(await indexer.index(segments));
+      }),
   );
 
   server.registerTool(
     "okf_concept_search",
     {
       title: "Search concepts",
-      description: [
-        "Full-text + structured search across concepts, ranked by relevance.",
-        "Filter by `bundle`, `type`, `tags`, named `scopes`, and `project`.",
-        "Global concepts are always included regardless of scope.",
-      ].join(" "),
+      description:
+        "Search long-term memory for past context, user preferences, or system states. " +
+        "ALWAYS use this tool first when a user asks a question about past interactions, " +
+        "established projects, or personal preferences before answering. " +
+        "Returns a lightweight list of matches (link, title, summary snippet) — NOT full " +
+        "documents. Pick the most relevant 'link' and call okf_concept_get to read its full content. " +
+        BUNDLE_NAMING_GUIDANCE,
       inputSchema: {
-        bundle: z.string().optional(),
-        text: z.string().max(500).optional(),
-        type: z.string().max(200).optional(),
-        tags: z.array(z.string()).optional(),
-        scopes: z.array(z.string()).optional(),
-        project: z.string().max(200).optional(),
-        limit: z.number().int().min(1).max(100).optional(),
-        offset: z.number().int().min(0).optional(),
+        must_include: z
+          .array(z.string())
+          .optional()
+          .describe("Keywords that MUST be present in the document (acts as AND)."),
+        should_include: z
+          .array(z.string())
+          .optional()
+          .describe("Keywords that are relevant but not strictly required (acts as OR)."),
+        text: z
+          .string()
+          .max(500)
+          .optional()
+          .describe(
+            "Optional free-text query. Used only when must_include/should_include are absent.",
+          ),
+        bundle: z
+          .string()
+          .optional()
+          .describe("Restrict the search to this bundle (or sub-path). Omit to search everything."),
+        type: z
+          .string()
+          .max(200)
+          .optional()
+          .describe(
+            "Filter to a single concept type (e.g. Preference, Architecture, Reference). See okf_concept_upsert for the full catalog.",
+          ),
+        tags: z.array(z.string()).optional().describe("Require ALL of these tags to be present."),
+        scopes: z
+          .array(z.string())
+          .optional()
+          .describe("Named scope keys to include (global concepts are always included)."),
+        project: z
+          .string()
+          .max(200)
+          .optional()
+          .describe("Include concepts scoped to this project."),
+        include_global: z
+          .boolean()
+          .optional()
+          .describe(
+            "When a 'bundle' is set, also fold in matches from the reserved 'global' bundle " +
+              "(bundle-local matches rank first). Defaults to true. Set false to search ONLY the " +
+              "specified bundle.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Max results to return (default 20, max 100)."),
+        offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)."),
       },
     },
-    async ({ bundle, text, type, tags, scopes, project, limit, offset }) => {
-      log.debug({ bundle, text, type, scopes, project }, "MCP okf_concept_search");
-      return json(
-        await search.search({
+    async ({
+      must_include,
+      should_include,
+      text,
+      bundle,
+      type,
+      tags,
+      scopes,
+      project,
+      include_global,
+      limit,
+      offset,
+    }) => {
+      log.debug(
+        { bundle, must_include, should_include, type, scopes, project, include_global },
+        "MCP okf_concept_search",
+      );
+      try {
+        const results = await search.search({
           ...(bundle !== undefined ? { bundlePath: bundle } : {}),
+          ...(must_include !== undefined ? { must_include } : {}),
+          ...(should_include !== undefined ? { should_include } : {}),
           ...(text !== undefined ? { text } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(tags !== undefined ? { tags } : {}),
           ...(scopes !== undefined ? { scopes } : {}),
           ...(project !== undefined ? { project } : {}),
+          ...(include_global !== undefined ? { includeGlobal: include_global } : {}),
           ...(limit !== undefined ? { limit } : {}),
           ...(offset !== undefined ? { offset } : {}),
-        }),
-      );
+        });
+        if (results.length === 0) {
+          return json({
+            status: "success",
+            results: [],
+            system_directive:
+              "0 results found. If you passed 'must_include', retry the search using 'should_include' to broaden the scope. If the user provided new information, use 'okf_concept_upsert' to store it.",
+          });
+        }
+        return json({
+          status: "success",
+          results,
+          system_directive:
+            "These are lightweight previews, not full documents. Review the snippets, then call 'okf_concept_get' with the 'link' (or bundle + path) of ONLY the concept(s) critically relevant to the current turn.",
+        });
+      } catch (err) {
+        if (err instanceof SearchQuerySyntaxError) {
+          return json({
+            status: "error",
+            error_code: "SEARCH_SYNTAX",
+            system_directive:
+              "Syntax Error processing the search query. Simplify your search terms and try again.",
+          });
+        }
+        return json(toToolError(err));
+      }
     },
   );
 
@@ -137,95 +276,182 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     "okf_concept_get",
     {
       title: "Get concept",
-      description: "Read a concept by bundle slug and concept path (with or without .md).",
-      inputSchema: { bundle: z.string(), path: z.string() },
+      description:
+        "Fetch the FULL markdown of ONE concept. This is step 2 of the search→get loop: call it " +
+        "after okf_concept_search to hydrate a result you selected. Accepts the search result's " +
+        "'link' (okf:// URI) OR an explicit bundle + path.",
+      inputSchema: {
+        link: z
+          .string()
+          .optional()
+          .describe(
+            "An okf:// URI from a search result (e.g. 'okf://memory/preferences/tone'). " +
+              "Case-insensitive. Provide this OR bundle+path.",
+          ),
+        bundle: z
+          .string()
+          .optional()
+          .describe(BUNDLE_DESC + " Required if 'link' is omitted."),
+        path: z
+          .string()
+          .optional()
+          .describe(PATH_DESC + " Required if 'link' is omitted."),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_get");
-      return json(await concepts.read(bundle, path, { trackRead: true }));
-    },
+    async ({ link, bundle, path }) =>
+      runTool(async () => {
+        log.debug({ link, bundle, path }, "MCP okf_concept_get");
+        const addr = resolveConceptAddress({ link, bundle, path });
+        const concept = await concepts.read(addr.bundle, addr.path, { trackRead: true });
+        const markdown =
+          serializeConcept(concept.frontmatter, concept.body) +
+          "\n\n[System Note: If any of this retrieved information is now outdated based on the user's latest prompt, immediately use 'okf_concept_upsert' to update it.]";
+        const { body: _body, ...rest } = concept;
+        return json({ ...rest, markdown });
+      }),
   );
 
   server.registerTool(
     "okf_concept_create",
     {
       title: "Create concept",
-      description: "Create a concept with OKF frontmatter. `type` is required.",
+      description:
+        "DEPRECATED — prefer okf_concept_upsert (it creates if absent, updates if present, and " +
+        "snapshots history). Only use this if you specifically need creation to FAIL on an existing path.",
       inputSchema: {
-        bundle: z.string(),
-        path: z.string(),
-        type: z.string().min(1).max(200),
-        title: z.string().max(500).optional(),
-        description: z.string().max(2000).optional(),
-        resource: z.string().max(2000).optional(),
-        tags: z.array(z.string().max(200)).optional(),
-        body: z.string().max(1_048_576).optional(),
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+        type: z.string().min(1).max(200).describe(TYPE_FIELD_DESCRIPTION),
+        title: z.string().max(500).optional().describe("Display title."),
+        description: z.string().max(2000).optional().describe("One-line summary."),
+        resource: z
+          .string()
+          .max(2000)
+          .optional()
+          .describe("Source/reference URI for this concept."),
+        tags: z.array(z.string().max(200)).optional().describe("Lowercase keyword tags."),
+        body: z.string().max(1_048_576).optional().describe("Markdown body content."),
       },
     },
-    async ({ bundle, path, type, title, description, resource, tags, body }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_create");
-      return json(
-        await concepts.create(bundle, path, {
-          type,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...(resource !== undefined ? { resource } : {}),
-          ...(tags !== undefined ? { tags } : {}),
-          ...(body !== undefined ? { body } : {}),
-        }),
-      );
-    },
+    async ({ bundle, path, type, title, description, resource, tags, body }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_create");
+        return json(
+          await concepts.create(bundle, path, {
+            type,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...(resource !== undefined ? { resource } : {}),
+            ...(tags !== undefined ? { tags } : {}),
+            ...(body !== undefined ? { body } : {}),
+          }),
+        );
+      }),
   );
 
   server.registerTool(
     "okf_concept_update",
     {
       title: "Update concept",
-      description: "Replace a concept's frontmatter fields and/or body.",
+      description:
+        "DEPRECATED — prefer okf_concept_upsert. Only use this if you specifically need the update " +
+        "to FAIL when the concept does not already exist.",
       inputSchema: {
-        bundle: z.string(),
-        path: z.string(),
-        type: z.string().max(200).optional(),
-        title: z.string().max(500).optional(),
-        description: z.string().max(2000).optional(),
-        resource: z.string().max(2000).optional(),
-        tags: z.array(z.string().max(200)).optional(),
-        body: z.string().max(1_048_576).optional(),
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+        type: z.string().max(200).optional().describe(TYPE_FIELD_DESCRIPTION),
+        title: z.string().max(500).optional().describe("Display title."),
+        description: z.string().max(2000).optional().describe("One-line summary."),
+        resource: z
+          .string()
+          .max(2000)
+          .optional()
+          .describe("Source/reference URI for this concept."),
+        tags: z.array(z.string().max(200)).optional().describe("Lowercase keyword tags."),
+        body: z.string().max(1_048_576).optional().describe("Markdown body content."),
       },
     },
-    async ({ bundle, path, type, title, description, resource, tags, body }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_update");
-      const current = await concepts.read(bundle, path);
-      return json(
-        await concepts.update(
-          bundle,
-          path,
-          {
-            ...current.frontmatter,
-            ...(type !== undefined ? { type } : {}),
+    async ({ bundle, path, type, title, description, resource, tags, body }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_update");
+        const current = await concepts.read(bundle, path);
+        return json(
+          await concepts.update(
+            bundle,
+            path,
+            {
+              ...current.frontmatter,
+              ...(type !== undefined ? { type } : {}),
+              ...(title !== undefined ? { title } : {}),
+              ...(description !== undefined ? { description } : {}),
+              ...(resource !== undefined ? { resource } : {}),
+              ...(tags !== undefined ? { tags } : {}),
+            },
+            body ?? current.body,
+          ),
+        );
+      }),
+  );
+
+  server.registerTool(
+    "okf_concept_upsert",
+    {
+      title: "Upsert concept",
+      description:
+        "Store a new fact, architectural rule, or user preference in long-term memory. " +
+        "Use this IMMEDIATELY when the user provides new information that should be remembered " +
+        "for future sessions. Never say 'I will remember this' without executing this tool. " +
+        "Creates the concept if it does not exist, otherwise updates it (saving a version snapshot). " +
+        BUNDLE_NAMING_GUIDANCE,
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+        type: z.string().min(1).max(200).describe(TYPE_FIELD_DESCRIPTION),
+        title: z.string().max(500).optional().describe("Display title."),
+        description: z.string().max(2000).optional().describe("One-line summary."),
+        resource: z
+          .string()
+          .max(2000)
+          .optional()
+          .describe("Source/reference URI for this concept."),
+        tags: z.array(z.string().max(200)).optional().describe("Lowercase keyword tags."),
+        body: z.string().max(1_048_576).optional().describe("Markdown body content."),
+      },
+    },
+    async ({ bundle, path, type, title, description, resource, tags, body }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_upsert");
+        return json(
+          await concepts.upsert(bundle, path, {
+            type,
             ...(title !== undefined ? { title } : {}),
             ...(description !== undefined ? { description } : {}),
             ...(resource !== undefined ? { resource } : {}),
             ...(tags !== undefined ? { tags } : {}),
-          },
-          body ?? current.body,
-        ),
-      );
-    },
+            ...(body !== undefined ? { body } : {}),
+          }),
+        );
+      }),
   );
 
   server.registerTool(
     "okf_concept_delete",
     {
       title: "Delete concept",
-      description: "Soft-delete a concept.",
-      inputSchema: { bundle: z.string(), path: z.string() },
+      description:
+        "DESTRUCTIVE. Soft-delete a single concept. Avoid in the append/update memory model — " +
+        "prefer correcting content via okf_concept_upsert. Use only on explicit request.",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_delete");
-      await concepts.delete(bundle, path);
-      return json({ deleted: `${bundle}/${path}` });
-    },
+    async ({ bundle, path }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_delete");
+        await concepts.delete(bundle, path);
+        return json({ status: "success", deleted: `${bundle}/${path}` });
+      }),
   );
 
   server.registerPrompt(
@@ -234,9 +460,9 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Create concept",
       description: "Prompt to guide concept creation with OKF frontmatter.",
       argsSchema: {
-        bundle: z.string().describe("Bundle slug"),
-        path: z.string().describe("Concept path (e.g. 'guides/deploy')"),
-        type: z.string().describe("Concept type (e.g. Playbook, Reference)"),
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+        type: z.string().describe(TYPE_FIELD_DESCRIPTION),
       },
     },
     ({ bundle, path, type }) => ({
@@ -248,7 +474,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
             text: [
               `Create a new concept in bundle "${bundle}" at path "${path}" of type "${type}".`,
               "",
-              "Use the okf_concept_create tool with the following structure:",
+              "Use the okf_concept_upsert tool with the following structure:",
               `- bundle: ${bundle}`,
               `- path: ${path}`,
               `- type: ${type}`,
@@ -267,76 +493,105 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     {
       title: "Concept links",
       description:
-        "List OKF references extracted from a concept's body (okf:// URIs and relative paths).",
-      inputSchema: { bundle: z.string(), path: z.string() },
+        "List outbound OKF references in a concept's body (okf:// URIs and relative paths). Use to " +
+        "traverse the knowledge graph forward from a concept you are reading.",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_links");
-      const concept = await concepts.read(bundle, path);
-      const links: string[] = [];
-      const okfRe = /\[([^\]]*)\]\(okf:\/\/([^)]+)\)/g;
-      let m: RegExpExecArray | null;
-      while ((m = okfRe.exec(concept.body)) !== null) {
-        if (m[2]) links.push(m[2]);
-      }
-      const relRe = /\[([^\]]*)\]\(\.\/([^)]+)\)/g;
-      while ((m = relRe.exec(concept.body)) !== null) {
-        if (m[2]) links.push(m[2].replace(/\.md$/, ""));
-      }
-      return json([...new Set(links)]);
-    },
+    async ({ bundle, path }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_links");
+        const concept = await concepts.read(bundle, path);
+        const links: string[] = [];
+        const okfRe = /\[([^\]]*)\]\(okf:\/\/([^)]+)\)/g;
+        let m: RegExpExecArray | null;
+        while ((m = okfRe.exec(concept.body)) !== null) {
+          if (m[2]) links.push(m[2]);
+        }
+        const relRe = /\[([^\]]*)\]\(\.\/([^)]+)\)/g;
+        while ((m = relRe.exec(concept.body)) !== null) {
+          if (m[2]) links.push(m[2].replace(/\.md$/, ""));
+        }
+        return json([...new Set(links)]);
+      }),
   );
 
   server.registerTool(
     "okf_concept_backlinks",
     {
       title: "Concept backlinks",
-      description: "Find concepts in the same bundle whose body references the given concept path.",
-      inputSchema: { bundle: z.string(), path: z.string() },
+      description:
+        "Find concepts in the same bundle whose body references the given concept path. Use to " +
+        "traverse the knowledge graph backward (what depends on / mentions this concept).",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_backlinks");
-      const segments = bundle.split("/").filter(Boolean);
-      const { bundle: resolved } = await bundles.resolve(segments);
-      const rows = await conceptRepo.listByBundle(resolved.id);
-      const results: { id: string; type: string; title?: string }[] = [];
-      for (const row of rows) {
-        if (row.body.includes(path) || row.body.includes(`okf://${bundle}/${path}`)) {
-          results.push({
-            id: row.slug,
-            type: row.type,
-            ...(row.title ? { title: row.title } : {}),
-          });
+    async ({ bundle, path }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_backlinks");
+        const segments = bundle.split("/").filter(Boolean);
+        const { bundle: resolved, path: bundlePath } = await bundles.resolve(segments);
+        const rows = await conceptRepo.listByBundle(resolved.id);
+        // Match references case-insensitively against the (lowercased) target.
+        const target = path.toLowerCase();
+        const okfTarget = `okf://${bundlePath}/${target}`;
+        const results: { id: string; link: string; type: string; title?: string }[] = [];
+        for (const row of rows) {
+          const body = row.body.toLowerCase();
+          if (body.includes(target) || body.includes(okfTarget)) {
+            results.push({
+              id: row.slug,
+              link: `okf://${bundlePath}/${row.slug}`,
+              type: row.type,
+              ...(row.title ? { title: row.title } : {}),
+            });
+          }
         }
-      }
-      return json(results);
-    },
+        return json(results);
+      }),
   );
 
   server.registerTool(
     "okf_concept_history",
     {
       title: "Concept history",
-      description: "List all saved versions of a concept (past 8 snapshots).",
-      inputSchema: { bundle: z.string(), path: z.string() },
+      description:
+        "List saved version snapshots of a concept (most recent first). Use to see how a concept " +
+        "changed over time before reading a specific version with okf_concept_read_version.",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+      },
     },
-    async ({ bundle, path }) => {
-      log.debug({ bundle, path }, "MCP okf_concept_history");
-      return json(await concepts.listVersions(bundle, path));
-    },
+    async ({ bundle, path }) =>
+      runTool(async () => {
+        log.debug({ bundle, path }, "MCP okf_concept_history");
+        return json(await concepts.listVersions(bundle, path));
+      }),
   );
 
   server.registerTool(
     "okf_concept_read_version",
     {
       title: "Read concept version",
-      description: "Read a specific historical version of a concept by version number.",
-      inputSchema: { bundle: z.string(), path: z.string(), version: z.number().int().min(1) },
+      description:
+        "Read a specific historical version of a concept by version number (obtain numbers from " +
+        "okf_concept_history).",
+      inputSchema: {
+        bundle: z.string().describe(BUNDLE_DESC),
+        path: z.string().describe(PATH_DESC),
+        version: z.number().int().min(1).describe("Version number from okf_concept_history."),
+      },
     },
-    async ({ bundle, path, version }) => {
-      log.debug({ bundle, path, version }, "MCP okf_concept_read_version");
-      return json(await concepts.readVersion(bundle, path, version));
-    },
+    async ({ bundle, path, version }) =>
+      runTool(async () => {
+        log.debug({ bundle, path, version }, "MCP okf_concept_read_version");
+        return json(await concepts.readVersion(bundle, path, version));
+      }),
   );
 
   server.registerResource(

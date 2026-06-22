@@ -116,6 +116,40 @@ suite("MCP server", () => {
     expect(data.frontmatter.title).toBe("Test");
   });
 
+  it("okf_concept_get appends the upsert system note to markdown", async () => {
+    const data = await callTool(client, "okf_concept_get", {
+      bundle: slug,
+      path: "mcp/subdir/test-concept",
+    });
+    expect(data.markdown).toContain("[System Note:");
+    expect(data.markdown).toContain("okf_concept_upsert");
+  });
+
+  it("okf_concept_upsert creates when absent and updates when present", async () => {
+    const created = await callTool(client, "okf_concept_upsert", {
+      bundle: slug,
+      path: "mcp/upsert-concept",
+      type: "reference",
+      title: "Upsert New",
+    });
+    expect(created.id).toBe("mcp/upsert-concept");
+    expect(created.frontmatter.title).toBe("Upsert New");
+
+    const updated = await callTool(client, "okf_concept_upsert", {
+      bundle: slug,
+      path: "mcp/upsert-concept",
+      type: "reference",
+      title: "Upsert Updated",
+    });
+    expect(updated.frontmatter.title).toBe("Upsert Updated");
+
+    const history = await callTool(client, "okf_concept_history", {
+      bundle: slug,
+      path: "mcp/upsert-concept",
+    });
+    expect(history.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("okf_concept_update modifies the concept", async () => {
     const data = await callTool(client, "okf_concept_update", {
       bundle: slug,
@@ -139,9 +173,31 @@ suite("MCP server", () => {
       bundle: slug,
       text: "Updated",
     });
-    expect(data.length).toBeGreaterThanOrEqual(1);
-    expect(data[0]!.id).toBe(`${slug}/mcp/subdir/test-concept`);
-    expect(data[0]!.bundle).toBe(slug);
+    expect(data.status).toBe("success");
+    expect(data.results.length).toBeGreaterThanOrEqual(1);
+    expect(data.results[0]!.id).toBe(`${slug}/mcp/subdir/test-concept`);
+    expect(data.results[0]!.bundle).toBe(slug);
+  });
+
+  it("okf_concept_search supports structured must_include/should_include", async () => {
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      must_include: ["Updated"],
+      should_include: ["test", "concept"],
+    });
+    expect(data.status).toBe("success");
+    expect(data.results.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("okf_concept_search returns a system_directive on zero results", async () => {
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      must_include: ["zzzznonexistentterm"],
+    });
+    expect(data.status).toBe("success");
+    expect(data.results).toEqual([]);
+    expect(data.system_directive).toContain("0 results found");
+    expect(data.system_directive).toContain("okf_concept_upsert");
   });
 
   it("okf_concept_search returns snippet in results", async () => {
@@ -157,7 +213,7 @@ suite("MCP server", () => {
       bundle: slug,
       text: "snippet",
     });
-    const match = data.find((r: { id: string }) => r.id.endsWith("snippet-test"));
+    const match = data.results.find((r: { id: string }) => r.id.endsWith("snippet-test"));
     expect(match).toBeDefined();
     expect(match.snippet).toBeDefined();
     expect(match.snippet).toContain("body content");
@@ -219,12 +275,14 @@ suite("MCP server", () => {
       limit: 10,
       offset: 0,
     });
-    expect(Array.isArray(data)).toBe(true);
+    expect(data.status).toBe("success");
+    expect(Array.isArray(data.results)).toBe(true);
   });
 
   it("okf_concept_search with no bundle filter (global)", async () => {
     const data = await callTool(client, "okf_concept_search", { text: "Full" });
-    expect(Array.isArray(data)).toBe(true);
+    expect(data.status).toBe("success");
+    expect(Array.isArray(data.results)).toBe(true);
   });
 
   // ── Resource template ───────────────────────────────────────────────────

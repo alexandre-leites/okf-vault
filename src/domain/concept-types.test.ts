@@ -3,13 +3,16 @@ import { normalizeConceptType, conceptTypeEquals } from "./concept-types.js";
 
 describe("normalizeConceptType", () => {
   it("normalizes known types to canonical form", () => {
-    expect(normalizeConceptType("playbook")).toBe("Playbook");
-    expect(normalizeConceptType("PLAYBOOK")).toBe("Playbook");
+    expect(normalizeConceptType("preference")).toBe("Preference");
+    expect(normalizeConceptType("PREFERENCE")).toBe("Preference");
+    expect(normalizeConceptType("architecture")).toBe("Architecture");
+    expect(normalizeConceptType("environment")).toBe("Environment");
+    expect(normalizeConceptType("programming standards")).toBe("Programming Standards");
+    expect(normalizeConceptType("workflow procedure")).toBe("Workflow Procedure");
+    expect(normalizeConceptType("interaction history")).toBe("Interaction History");
+    expect(normalizeConceptType("glossary definition")).toBe("Glossary Definition");
     expect(normalizeConceptType("reference")).toBe("Reference");
-    expect(normalizeConceptType("metric")).toBe("Metric");
-    expect(normalizeConceptType("api endpoint")).toBe("API Endpoint");
-    expect(normalizeConceptType("bigquery table")).toBe("BigQuery Table");
-    expect(normalizeConceptType("bigquery dataset")).toBe("BigQuery Dataset");
+    expect(normalizeConceptType("transient state")).toBe("Transient State");
   });
 
   it("passes through unknown types unchanged", () => {
@@ -18,7 +21,7 @@ describe("normalizeConceptType", () => {
   });
 
   it("trims whitespace", () => {
-    expect(normalizeConceptType("  playbook  ")).toBe("Playbook");
+    expect(normalizeConceptType("  preference  ")).toBe("Preference");
   });
 });
 

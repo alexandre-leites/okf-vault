@@ -38,10 +38,15 @@ export interface SplitPath {
   readonly full: string;
 }
 
-/** Strips a trailing `.md`, leading slashes, and normalizes a concept path. */
+/**
+ * Strips a trailing `.md`, leading slashes, normalizes, and lowercases a
+ * concept path. Lowercasing makes every path segment (sub-directories and the
+ * leaf slug) case-insensitive for lookups and case-normalized on write, so
+ * `Guides/Deploy` and `guides/deploy` address the same concept.
+ */
 export function normalizeConceptPath(raw: string): string {
   const trimmed = raw.replace(/\.md$/i, "").replace(/^\/+/, "").trim();
-  const normalized = posix.normalize(trimmed);
+  const normalized = posix.normalize(trimmed).toLowerCase();
   if (normalized.startsWith("..") || normalized.startsWith("/") || normalized === ".") {
     throw new OkfValidationError(`Invalid concept path: ${raw}`);
   }
@@ -111,6 +116,36 @@ export class ConceptService {
       conceptToColumns(bundleId, slug, full, frontmatter, body),
     );
     return rowToConcept(row, full);
+  }
+
+  /**
+   * Create-or-update a concept in a single call. When the concept does not yet
+   * exist it is created; when it does, the existing frontmatter/body are merged
+   * with the provided fields and a version snapshot is saved before writing
+   * (same history semantics as {@link update}). This is the agent-facing
+   * append/update memory primitive.
+   */
+  async upsert(rootSlug: string, rawPath: string, input: CreateConceptInput): Promise<Concept> {
+    const { dirs, slug, full } = splitConceptPath(rawPath);
+    this.assertNotReserved(slug);
+    const bundleId = (await this.bundleService.resolveOrCreateChild(rootSlug, dirs)).id;
+    const existing = await this.concepts.findBySlug(bundleId, slug);
+
+    if (!existing) {
+      return this.create(rootSlug, full, input);
+    }
+
+    const current = rowToConcept(existing, full);
+    const nextFrontmatter: Frontmatter = {
+      ...current.frontmatter,
+      ...(input.type !== undefined ? { type: input.type } : {}),
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.resource !== undefined ? { resource: input.resource } : {}),
+      ...(input.tags !== undefined ? { tags: input.tags } : {}),
+    };
+    const nextBody = input.body ?? current.body;
+    return this.update(rootSlug, full, nextFrontmatter, nextBody);
   }
 
   async listVersions(rootSlug: string, rawPath: string): Promise<ConceptVersionRow[]> {

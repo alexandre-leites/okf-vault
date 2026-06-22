@@ -61,7 +61,7 @@ const CreateBundleBodySchema = z.object({
 });
 
 const CreateConceptBodySchema = z.object({
-  type: z.string().min(1).max(200).openapi({ example: "Playbook" }),
+  type: z.string().min(1).max(200).openapi({ example: "Architecture" }),
   title: z.string().max(500).optional(),
   description: z.string().max(2000).optional(),
   resource: z.string().max(2000).optional(),
@@ -175,6 +175,10 @@ const routes = {
         tags: z.string().max(500).optional().openapi({ example: "errors,oncall" }),
         scopes: z.string().max(500).optional().openapi({ example: "tech/typescript,network" }),
         project: z.string().max(200).optional(),
+        include_global: z.coerce.boolean().optional().openapi({
+          description:
+            "With `bundle` set, also include matches from the reserved 'global' bundle (default true).",
+        }),
         limit: z.coerce.number().int().min(1).max(100).optional(),
         offset: z.coerce.number().int().min(0).optional(),
       }),
@@ -368,6 +372,7 @@ export function createApiServer({ config, log, db }: ApiServerOptions): OpenAPIH
       ...(q.tags !== undefined ? { tags: q.tags.split(",").map((t) => t.trim()) } : {}),
       ...(q.scopes !== undefined ? { scopes: q.scopes.split(",").map((s) => s.trim()) } : {}),
       ...(q.project !== undefined ? { project: q.project } : {}),
+      ...(q.include_global !== undefined ? { includeGlobal: q.include_global } : {}),
       ...(q.limit !== undefined ? { limit: q.limit } : {}),
       ...(q.offset !== undefined ? { offset: q.offset } : {}),
     });
