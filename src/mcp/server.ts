@@ -460,11 +460,13 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     "create_concept",
     {
       title: "Create concept",
-      description: "Prompt to guide concept creation with OKF frontmatter.",
+      description: "Guide concept creation with OKF frontmatter via okf_concept_upsert.",
       argsSchema: {
-        bundle: z.string().describe(BUNDLE_DESC),
-        path: z.string().describe(PATH_DESC),
-        type: z.string().describe(TYPE_FIELD_DESCRIPTION),
+        bundle: z.string().describe("Bundle slug (e.g. 'global' or a project name)."),
+        path: z.string().describe("Concept path within the bundle (e.g. 'guides/deploy')."),
+        type: z
+          .string()
+          .describe("Concept type (e.g. Preference, Architecture, Reference, Playbook)."),
       },
     },
     ({ bundle, path, type }) => ({

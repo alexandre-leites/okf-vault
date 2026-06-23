@@ -26,5 +26,8 @@ COPY --from=builder /app/drizzle ./drizzle
 
 EXPOSE 3000
 
+# Config resolves with precedence: CLI flags > env vars > config file > defaults.
+# Mount a JSON config at /app/okfvault.json (or set OKFVAULT_CONFIG) to use the
+# FILE path. `serve --migrate` applies pending migrations before every start.
 ENTRYPOINT ["tini", "--"]
-CMD ["node", "dist/cli.js", "serve"]
+CMD ["node", "dist/cli.js", "serve", "--migrate"]

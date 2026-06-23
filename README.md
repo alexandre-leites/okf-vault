@@ -53,17 +53,17 @@ Resolved with precedence **CLI flags > environment variables > config file >
 defaults**. Config file: `./okfvault.json`, `~/.config/okfvault/config.json`,
 or `$OKFVAULT_CONFIG`.
 
-| Key              | Default                   | Description                        |
-| ---------------- | ------------------------- | ---------------------------------- |
-| `DATABASE_URL`   | `postgres://okfvault:...` | Postgres connection string         |
-| `HOST`           | `0.0.0.0`                 | HTTP listen address                |
-| `PORT`           | `3000`                    | HTTP listen port                   |
-| `LOG_LEVEL`      | `info`                    | pino log level                     |
-| `CORS_ORIGINS`   | (empty)                   | Comma-separated origins or `*`     |
-| `API_KEY`        | (empty)                   | Bearer token (disabled when empty) |
-| `MAX_BODY_SIZE`  | `1048576`                 | Max request body in bytes          |
-| `RATE_LIMIT_RPS` | `100`                     | Max requests per second per IP     |
-| `MCP_TRANSPORT`  | `stdio`                   | MCP transport: `stdio` or `sse`    |
+| Key              | Default                   | Description                                |
+| ---------------- | ------------------------- | ------------------------------------------ |
+| `DATABASE_URL`   | `postgres://okfvault:...` | Postgres connection string                 |
+| `HOST`           | `0.0.0.0`                 | HTTP listen address                        |
+| `PORT`           | `3000`                    | HTTP listen port                           |
+| `LOG_LEVEL`      | `info`                    | pino log level                             |
+| `CORS_ORIGINS`   | (empty)                   | Comma-separated origins or `*`             |
+| `API_KEY`        | (empty)                   | Bearer token (disabled when empty)         |
+| `MAX_BODY_SIZE`  | `1048576`                 | Max request body in bytes                  |
+| `RATE_LIMIT_RPS` | `100`                     | Max requests per second per IP             |
+| `MCP_TRANSPORT`  | `both`                    | MCP transport: `both`/`stdio`/`http`/`sse` |
 
 ## REST API
 
@@ -130,17 +130,17 @@ The server exposes MCP two ways at once:
   by **URL** (multi-client, session-based). Recommended for opencode, Cursor,
   and remote/shared setups.
 - **stdio** — the client launches `okfvault serve` as a subprocess and talks
-  over stdin/stdout. Connected when `MCP_TRANSPORT` is `stdio` (default) or
-  `both`.
+  over stdin/stdout. Connected when `MCP_TRANSPORT` is `both` (default) or
+  `stdio`.
 
 `MCP_TRANSPORT` values:
 
-| Value             | Streamable HTTP `/mcp` | stdio |
-| ----------------- | ---------------------- | ----- |
-| `stdio` (default) | ✅                     | ✅    |
-| `both`            | ✅                     | ✅    |
-| `http`            | ✅                     | ❌    |
-| `sse` (legacy)    | ✅                     | ❌    |
+| Value            | Streamable HTTP `/mcp` | stdio |
+| ---------------- | ---------------------- | ----- |
+| `both` (default) | ✅                     | ✅    |
+| `stdio`          | ✅                     | ✅    |
+| `http`           | ✅                     | ❌    |
+| `sse` (legacy)   | ✅                     | ❌    |
 
 First, start the server and apply migrations once:
 

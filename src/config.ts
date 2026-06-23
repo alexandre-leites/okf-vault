@@ -23,13 +23,12 @@ const EnvSchema = z.object({
   MAX_BODY_SIZE: z.coerce.number().int().positive().default(1_048_576),
   RATE_LIMIT_RPS: z.coerce.number().int().positive().default(100),
   // Selects which MCP transports to expose. The Streamable HTTP endpoint at
-  // `/mcp` is ALWAYS mounted (so the server is URL-reachable) unless set to
-  // `stdio`-only is desired with HTTP off — here `stdio` keeps HTTP mounted too.
-  // - `stdio` (default): connect stdio AND mount HTTP `/mcp`.
+  // `/mcp` is ALWAYS mounted (so the server is URL-reachable).
+  // - `both` (default): connect stdio AND mount HTTP `/mcp`.
+  // - `stdio`: connect stdio AND mount HTTP `/mcp` (same as `both`).
   // - `http`: mount HTTP `/mcp` only (no stdio).
   // - `sse`:  legacy alias; behaves like `http` (HTTP `/mcp`), no stdio.
-  // - `both`: explicit stdio + HTTP (same as `stdio`).
-  MCP_TRANSPORT: z.enum(["stdio", "http", "sse", "both"]).default("stdio"),
+  MCP_TRANSPORT: z.enum(["stdio", "http", "sse", "both"]).default("both"),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
