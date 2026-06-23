@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError } from "commander";
+import { Command } from "commander";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createDb } from "./db/client.js";
@@ -7,14 +7,6 @@ import { runMigrations } from "./db/migrate.js";
 import { createServices, type Services } from "./services/factory.js";
 import { serve } from "./mcp/server.js";
 import { SearchQuerySyntaxError } from "./services/search-query.js";
-
-function parsePort(value: string): number {
-  const n = parseInt(value, 10);
-  if (isNaN(n) || n < 1 || n > 65535) {
-    throw new InvalidArgumentError("Port must be an integer between 1 and 65535.");
-  }
-  return n;
-}
 
 const config = loadConfig();
 const log = createLogger(config);
@@ -300,21 +292,63 @@ program
 
 program
   .command("serve")
-  .description("Expose the vault over MCP (stdio) and a REST API.")
-  .option("--host <host>", "REST API bind host", config.HOST)
-  .option("--port <port>", "REST API port", String(config.PORT))
+  .description("Expose the vault over MCP (stdio + HTTP) and a REST API.")
+  .option("--host <host>", "REST API bind host (env HOST)", config.HOST)
+  .option("--port <port>", "REST API port (env PORT)", String(config.PORT))
+  .option("--database-url <url>", "Postgres connection string (env DATABASE_URL)")
+  .option("--log-level <level>", "Log level (env LOG_LEVEL)")
+  .option("--log-pretty", "Pretty-print logs (env LOG_PRETTY)")
+  .option("--cors-origins <origins>", "Comma-separated origins or '*' (env CORS_ORIGINS)")
+  .option("--api-key <key>", "Bearer token for auth (env API_KEY)")
+  .option("--max-body-size <bytes>", "Max request body in bytes (env MAX_BODY_SIZE)")
+  .option("--rate-limit-rps <rps>", "Max requests/sec per IP (env RATE_LIMIT_RPS)")
+  .option("--mcp-transport <mode>", "MCP transport: stdio|http|sse|both (env MCP_TRANSPORT)")
   .option("--migrate", "Apply pending migrations before serving.")
-  .action(async (opts: { host: string; port: string; migrate?: boolean }) => {
-    const port = parsePort(opts.port);
-    if (opts.migrate === true) await runMigrations(databaseUrl(), log);
-    const handle = createDb(databaseUrl());
-    await serve({
-      config: { ...config, HOST: opts.host, PORT: port, DATABASE_URL: databaseUrl() },
-      log,
-      db: handle.db,
-      onShutdown: () => handle.close(),
-    });
-  });
+  .action(
+    async (opts: {
+      host: string;
+      port: string;
+      databaseUrl?: string;
+      logLevel?: string;
+      logPretty?: boolean;
+      corsOrigins?: string;
+      apiKey?: string;
+      maxBodySize?: string;
+      rateLimitRps?: string;
+      mcpTransport?: string;
+      migrate?: boolean;
+    }) => {
+      // Re-resolve config with CLI flags as highest-precedence overrides so they
+      // are validated/coerced by the same schema as env/file values.
+      const overrides: Record<string, string> = {};
+      const set = (key: string, value: string | undefined) => {
+        if (value !== undefined) overrides[key] = value;
+      };
+      // --database-url falls back to the global option for backward compatibility.
+      set("DATABASE_URL", opts.databaseUrl ?? program.opts<{ databaseUrl?: string }>().databaseUrl);
+      set("HOST", opts.host);
+      set("PORT", opts.port);
+      set("LOG_LEVEL", opts.logLevel);
+      if (opts.logPretty === true) set("LOG_PRETTY", "true");
+      set("CORS_ORIGINS", opts.corsOrigins);
+      set("API_KEY", opts.apiKey);
+      set("MAX_BODY_SIZE", opts.maxBodySize);
+      set("RATE_LIMIT_RPS", opts.rateLimitRps);
+      set("MCP_TRANSPORT", opts.mcpTransport);
+
+      const merged = loadConfig(undefined, overrides);
+      const serveLog = createLogger(merged);
+
+      if (opts.migrate === true) await runMigrations(merged.DATABASE_URL, serveLog);
+      const handle = createDb(merged.DATABASE_URL);
+      await serve({
+        config: merged,
+        log: serveLog,
+        db: handle.db,
+        onShutdown: () => handle.close(),
+      });
+    },
+  );
 
 program.parseAsync().catch((error: unknown) => {
   log.error({ err: error }, "Fatal error");

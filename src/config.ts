@@ -10,7 +10,7 @@ const EnvSchema = z.object({
     .string()
     .min(1, "DATABASE_URL is required (postgres connection string).")
     .default("postgres://okfvault:okfvault@192.168.31.111:5432/okf_vault"),
-  HOST: z.string().default("127.0.0.1"),
+  HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   LOG_LEVEL: LogLevelSchema.default("info"),
   LOG_PRETTY: z
@@ -22,7 +22,14 @@ const EnvSchema = z.object({
   API_KEY: z.string().default(""),
   MAX_BODY_SIZE: z.coerce.number().int().positive().default(1_048_576),
   RATE_LIMIT_RPS: z.coerce.number().int().positive().default(100),
-  MCP_TRANSPORT: z.enum(["stdio", "sse"]).default("stdio"),
+  // Selects which MCP transports to expose. The Streamable HTTP endpoint at
+  // `/mcp` is ALWAYS mounted (so the server is URL-reachable) unless set to
+  // `stdio`-only is desired with HTTP off — here `stdio` keeps HTTP mounted too.
+  // - `stdio` (default): connect stdio AND mount HTTP `/mcp`.
+  // - `http`: mount HTTP `/mcp` only (no stdio).
+  // - `sse`:  legacy alias; behaves like `http` (HTTP `/mcp`), no stdio.
+  // - `both`: explicit stdio + HTTP (same as `stdio`).
+  MCP_TRANSPORT: z.enum(["stdio", "http", "sse", "both"]).default("stdio"),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
@@ -73,12 +80,22 @@ function loadConfigFile(): Record<string, unknown> {
 }
 
 /**
- * Loads configuration with precedence: explicit `overrides` > environment
+ * Loads configuration with precedence:
+ * `rawOverrides` (e.g. CLI flags, validated by the schema) > environment
  * variables > config file (`okfvault.json` / `~/.config/okfvault/config.json`
- * / `$OKFVAULT_CONFIG`) > built-in defaults. Fails fast with a clear message
+ * / `$OKFVAULT_CONFIG`) > built-in defaults, with `overrides` applied last as
+ * already-typed values that bypass validation. Fails fast with a clear message
  * if any resolved value is invalid.
+ *
+ * @param overrides    already-typed config values applied with top precedence
+ *                     (bypass schema validation).
+ * @param rawOverrides string-valued overrides (CLI flags) merged into the
+ *                     pre-validation map so they are coerced/validated like env.
  */
-export function loadConfig(overrides: Partial<Config> = {}): Config {
+export function loadConfig(
+  overrides: Partial<Config> = {},
+  rawOverrides: Record<string, string> = {},
+): Config {
   const file = loadConfigFile();
 
   const merged: Record<string, unknown> = {};
@@ -90,6 +107,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     else if (typeof fromFile === "number" || typeof fromFile === "boolean") {
       merged[key] = String(fromFile);
     }
+  }
+
+  // CLI flags win over env/file but still pass through schema coercion.
+  for (const [key, value] of Object.entries(rawOverrides)) {
+    if (value !== undefined) merged[key] = value;
   }
 
   const result = EnvSchema.safeParse(merged);

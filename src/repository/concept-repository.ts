@@ -151,9 +151,11 @@ export class ConceptRepository {
         ? sql<number>`GREATEST(ts_rank(${wtsvector}, ${tsQuery}), similarity(coalesce(${concepts.title}, '') || ' ' || coalesce(${concepts.description}, '') || ' ' || ${concepts.body}, ${text}))`
         : sql<number>`0`;
 
+    // StartSel/StopSel must be non-empty for ts_headline; use sentinels that the
+    // service layer strips, so highlight markers never leak into the snippet.
     const headline =
       tsQuery !== undefined
-        ? sql<string>`coalesce(ts_headline('english', ${concepts.body}, ${tsQuery}, 'MaxWords=40,MinWords=15,StartSel=,StopSel='), '')`
+        ? sql<string>`coalesce(ts_headline('english', ${concepts.body}, ${tsQuery}, 'MaxWords=40,MinWords=15,StartSel=«,StopSel=»'), '')`
         : sql<string>`''`;
 
     const rows = await this.db

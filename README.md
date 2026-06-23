@@ -9,7 +9,7 @@ agent-friendly while the storage is optimized.
 ## Features
 
 - **REST API** — Full CRUD for bundles and concepts, OpenAPI docs at `/docs`
-- **MCP server** — 9 tools, resource templates (`okf://{bundle}/{path+}`), prompts, stdio or SSE transport
+- **MCP server** — Agent-optimized tools, resource templates (`okf://{bundle}/{path+}`), prompts, stdio or SSE transport
 - **Full-text search** — Postgres `tsvector` + `pg_trgm` with typo-tolerant fuzzy matching
 - **Scope-based organization** — Global, named, and project scopes
 - **Live directory synthesis** — `index.md` (§6) and `log.md` (§7) synthesized on read
@@ -56,7 +56,7 @@ or `$OKFVAULT_CONFIG`.
 | Key              | Default                   | Description                        |
 | ---------------- | ------------------------- | ---------------------------------- |
 | `DATABASE_URL`   | `postgres://okfvault:...` | Postgres connection string         |
-| `HOST`           | `127.0.0.1`               | HTTP listen address                |
+| `HOST`           | `0.0.0.0`                 | HTTP listen address                |
 | `PORT`           | `3000`                    | HTTP listen port                   |
 | `LOG_LEVEL`      | `info`                    | pino log level                     |
 | `CORS_ORIGINS`   | (empty)                   | Comma-separated origins or `*`     |
@@ -88,17 +88,27 @@ Interactive docs at `/docs`; OpenAPI spec at `/openapi.json`.
 
 ## MCP tools
 
-| Tool                 | Description                        |
-| -------------------- | ---------------------------------- |
-| `okf_bundle_list`    | List all bundles                   |
-| `okf_bundle_create`  | Create a bundle                    |
-| `okf_bundle_delete`  | Soft-delete a bundle               |
-| `okf_bundle_index`   | Directory listing (progressive)    |
-| `okf_concept_search` | Full-text + structured search      |
-| `okf_concept_get`    | Read a concept (tracks read count) |
-| `okf_concept_create` | Create a concept                   |
-| `okf_concept_update` | Update a concept                   |
-| `okf_concept_delete` | Soft-delete a concept              |
+| Tool                       | Description                                                          |
+| -------------------------- | -------------------------------------------------------------------- |
+| `okf_concept_search`       | Search memory; returns lightweight previews (link, title, snippet)   |
+| `okf_concept_get`          | Hydrate one concept by `link` or `bundle`+`path` (tracks read count) |
+| `okf_concept_upsert`       | Create-or-update a concept (saves a version snapshot on update)      |
+| `okf_bundle_index`         | Directory listing of a bundle (progressive disclosure)               |
+| `okf_bundle_list`          | List all bundles                                                     |
+| `okf_bundle_create`        | Create a bundle                                                      |
+| `okf_concept_links`        | Outbound OKF references from a concept's body                        |
+| `okf_concept_backlinks`    | Concepts referencing a given concept                                 |
+| `okf_concept_history`      | List a concept's version snapshots                                   |
+| `okf_concept_read_version` | Read a specific historical version                                   |
+| `okf_concept_create`       | _Deprecated — prefer `okf_concept_upsert`_                           |
+| `okf_concept_update`       | _Deprecated — prefer `okf_concept_upsert`_                           |
+| `okf_bundle_delete`        | _Destructive — soft-delete a bundle and its concepts_                |
+| `okf_concept_delete`       | _Destructive — soft-delete a concept_                                |
+
+Bundle naming: use the reserved **`global`** bundle (always present, case-insensitive)
+for cross-project knowledge (preferences, standards); use the git repository or
+project name for project-specific knowledge. Bundle slugs, concept paths, and
+`okf://` URIs are case-insensitive and normalized to lowercase.
 
 ### MCP Resources
 
@@ -111,6 +121,168 @@ Interactive docs at `/docs`; OpenAPI spec at `/openapi.json`.
 | Prompt           | Description                               |
 | ---------------- | ----------------------------------------- |
 | `create_concept` | Guides concept creation with correct args |
+
+### Connecting an MCP client
+
+The server exposes MCP two ways at once:
+
+- **Streamable HTTP** at `/mcp` — **always mounted**, so any client can connect
+  by **URL** (multi-client, session-based). Recommended for opencode, Cursor,
+  and remote/shared setups.
+- **stdio** — the client launches `okfvault serve` as a subprocess and talks
+  over stdin/stdout. Connected when `MCP_TRANSPORT` is `stdio` (default) or
+  `both`.
+
+`MCP_TRANSPORT` values:
+
+| Value             | Streamable HTTP `/mcp` | stdio |
+| ----------------- | ---------------------- | ----- |
+| `stdio` (default) | ✅                     | ✅    |
+| `both`            | ✅                     | ✅    |
+| `http`            | ✅                     | ❌    |
+| `sse` (legacy)    | ✅                     | ❌    |
+
+First, start the server and apply migrations once:
+
+```bash
+okfvault serve --host 0.0.0.0 --port 3000 --migrate
+# MCP endpoint URL:  http://<host>:3000/mcp
+```
+
+The endpoint URL is `http://<host>:3000/mcp` (use `https://` behind a TLS proxy
+for remote access). If `API_KEY` is set, send `Authorization: Bearer <API_KEY>`.
+
+#### opencode
+
+Connect by URL (`type: "remote"`). Add to `opencode.json` (project root) or
+`~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "okf-vault": {
+      "type": "remote",
+      "url": "http://localhost:3000/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+With auth enabled, add headers:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "okf-vault": {
+      "type": "remote",
+      "url": "http://localhost:3000/mcp",
+      "enabled": true,
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}
+```
+
+Prefer opencode to launch the server itself? Use `type: "local"`:
+
+```json
+{
+  "mcp": {
+    "okf-vault": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/okf-vault/dist/cli.js", "serve"],
+      "enabled": true,
+      "environment": { "DATABASE_URL": "postgres://okfvault:okfvault@localhost:5432/okf_vault" }
+    }
+  }
+}
+```
+
+#### Claude
+
+**Claude Code (CLI)** — connect by URL (HTTP transport):
+
+```bash
+claude mcp add --transport http okf-vault http://localhost:3000/mcp
+# with auth:
+claude mcp add --transport http okf-vault http://localhost:3000/mcp \
+  --header "Authorization: Bearer YOUR_API_KEY"
+```
+
+Or have Claude Code spawn it over stdio:
+
+```bash
+claude mcp add okf-vault -- node /absolute/path/to/okf-vault/dist/cli.js serve
+```
+
+**Claude Desktop** — edit `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`)
+and restart Claude. URL (HTTP) form:
+
+```json
+{
+  "mcpServers": {
+    "okf-vault": {
+      "type": "http",
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+stdio (spawned subprocess) form:
+
+```json
+{
+  "mcpServers": {
+    "okf-vault": {
+      "command": "node",
+      "args": ["/absolute/path/to/okf-vault/dist/cli.js", "serve"],
+      "env": { "DATABASE_URL": "postgres://okfvault:okfvault@localhost:5432/okf_vault" }
+    }
+  }
+}
+```
+
+#### Cursor
+
+Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project), then reload.
+Cursor connects by URL:
+
+```json
+{
+  "mcpServers": {
+    "okf-vault": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+With auth:
+
+```json
+{
+  "mcpServers": {
+    "okf-vault": {
+      "url": "http://localhost:3000/mcp",
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}
+```
+
+> **stdio note:** when a client spawns the server over stdio, keep `LOG_LEVEL`
+> quiet — MCP clients require clean stdout for the JSON-RPC stream.
+
+#### Verify the connection
+
+Once connected the client should list the tools (`okf_concept_search`,
+`okf_concept_upsert`, …). An agent then calls `okf_concept_search` to recall
+memory and `okf_concept_upsert` to store new facts.
 
 ## CLI
 

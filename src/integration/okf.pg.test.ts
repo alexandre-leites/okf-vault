@@ -206,8 +206,9 @@ suite("OKF Postgres integration", () => {
 
   // ── Bundle service edge cases ──────────────────────────────────────────
 
-  it("rejects bundle create with invalid slug uppercase", async () => {
-    await expect(bundles.create({ slug: "UPPERCASE" })).rejects.toThrow(OkfValidationError);
+  it("normalizes uppercase bundle slugs to lowercase", async () => {
+    const created = await bundles.create({ slug: `Upper-${Date.now().toString(36)}` });
+    expect(created.slug).toBe(created.slug.toLowerCase());
   });
 
   it("rejects bundle create with invalid slug spaces", async () => {

@@ -48,7 +48,8 @@ export interface SearchResult {
 
 /** Clamps a snippet to the preview length on a word boundary where possible. */
 function clampSnippet(text: string): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
+  // Strip the ts_headline highlight sentinels (see concept-repository).
+  const collapsed = text.replace(/[«»]/g, "").replace(/\s+/g, " ").trim();
   if (collapsed.length <= SNIPPET_LENGTH) return collapsed;
   const slice = collapsed.slice(0, SNIPPET_LENGTH);
   const lastSpace = slice.lastIndexOf(" ");

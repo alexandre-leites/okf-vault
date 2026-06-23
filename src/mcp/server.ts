@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "../db/client.js";
 import { createServices } from "../services/factory.js";
@@ -306,8 +307,9 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
         const markdown =
           serializeConcept(concept.frontmatter, concept.body) +
           "\n\n[System Note: If any of this retrieved information is now outdated based on the user's latest prompt, immediately use 'okf_concept_upsert' to update it.]";
-        const { body: _body, ...rest } = concept;
-        return json({ ...rest, markdown });
+        // Return metadata + rendered markdown; omit the duplicate raw `body`.
+        const { id, scope, frontmatter } = concept;
+        return json({ id, scope, frontmatter, markdown });
       }),
   );
 
@@ -641,44 +643,85 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
   return server;
 }
 
+/** Raw Node req/res pair surfaced by @hono/node-server via `c.env`. */
+interface NodeHttpEnv {
+  readonly incoming: import("node:http").IncomingMessage;
+  readonly outgoing: import("node:http").ServerResponse;
+}
+
 /**
  * Starts the REST API and MCP server in the same process and registers
  * graceful-shutdown handlers that drain HTTP and close the database pool.
- * MCP transport can be "stdio" (default) or "sse".
+ *
+ * The Streamable HTTP MCP endpoint (`/mcp`) is ALWAYS mounted so the server is
+ * reachable by URL. When `MCP_TRANSPORT` is `stdio` (default) or `both`, a
+ * stdio transport is additionally connected so a parent process can speak MCP
+ * over stdin/stdout. Set `MCP_TRANSPORT=http` (or legacy `sse`) for HTTP only.
  */
 export async function serve({ config, log, db, onShutdown }: ServeOptions): Promise<void> {
   const { createApiServer } = await import("../api/server.js");
   const { serve: honoServe } = await import("@hono/node-server");
+  const { RESPONSE_ALREADY_SENT } = await import("@hono/node-server/utils/response");
 
-  const mcpServer = createMcpServer(db, log);
   const apiApp = createApiServer({ config, log, db });
 
-  const transport = config.MCP_TRANSPORT ?? "stdio";
+  const mode = config.MCP_TRANSPORT ?? "stdio";
+  const enableStdio = mode === "stdio" || mode === "both";
 
-  let sseTransport: SSEServerTransport | undefined;
+  // ── Streamable HTTP transport (always mounted) ──────────────────────────
+  // One transport + McpServer per session, keyed by the MCP session id header.
+  const httpSessions = new Map<string, StreamableHTTPServerTransport>();
 
-  if (transport === "sse") {
-    apiApp.get("/mcp", async (c) => {
-      const incoming = c.env as {
-        incoming: import("node:http").IncomingMessage;
-        outgoing: import("node:http").ServerResponse;
-      };
-      sseTransport = new SSEServerTransport("/mcp", incoming.outgoing);
-      await mcpServer.connect(sseTransport);
-      await sseTransport.start();
-    });
+  const handleMcp = async (c: { req: { raw: Request }; env: unknown }) => {
+    const { incoming, outgoing } = c.env as NodeHttpEnv;
+    const sessionId = c.req.raw.headers.get("mcp-session-id") ?? undefined;
+    const method = c.req.raw.method;
 
-    apiApp.post("/mcp", async (c) => {
-      const incoming = c.env as {
-        incoming: import("node:http").IncomingMessage;
-        outgoing: import("node:http").ServerResponse;
-      };
-      if (!sseTransport) {
-        return c.json({ error: "SSE connection not established" }, 500);
+    let transport = sessionId ? httpSessions.get(sessionId) : undefined;
+
+    if (!transport) {
+      if (method !== "POST") {
+        outgoing.statusCode = 400;
+        outgoing.setHeader("content-type", "application/json");
+        outgoing.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "No valid session. Initialize with a POST first." },
+            id: null,
+          }),
+        );
+        return RESPONSE_ALREADY_SENT;
       }
-      await sseTransport.handlePostMessage(incoming.incoming, incoming.outgoing, c.req.raw.body);
-    });
-  }
+      // New session: spin up a fresh server bound to a new stateful transport.
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          httpSessions.set(id, transport!);
+          log.debug({ sessionId: id }, "MCP HTTP session initialized");
+        },
+      });
+      transport.onclose = () => {
+        if (transport!.sessionId) httpSessions.delete(transport!.sessionId);
+      };
+      const server = createMcpServer(db, log);
+      await server.connect(transport as Parameters<McpServer["connect"]>[0]);
+    }
+
+    let body: unknown;
+    if (method === "POST") {
+      try {
+        body = await c.req.raw.clone().json();
+      } catch {
+        body = undefined;
+      }
+    }
+    await transport.handleRequest(incoming, outgoing, body);
+    return RESPONSE_ALREADY_SENT;
+  };
+
+  apiApp.post("/mcp", handleMcp);
+  apiApp.get("/mcp", handleMcp);
+  apiApp.delete("/mcp", handleMcp);
 
   const httpServer = await new Promise<ReturnType<typeof honoServe>>((resolve, reject) => {
     try {
@@ -688,6 +731,7 @@ export async function serve({ config, log, db, onShutdown }: ServeOptions): Prom
           log.info({ host: config.HOST, port: info.port }, "REST API listening");
           log.info(`OpenAPI: http://${config.HOST}:${info.port}/openapi.json`);
           log.info(`Docs:    http://${config.HOST}:${info.port}/docs`);
+          log.info(`MCP:     http://${config.HOST}:${info.port}/mcp (Streamable HTTP)`);
           resolve(srv);
         },
       );
@@ -704,7 +748,8 @@ export async function serve({ config, log, db, onShutdown }: ServeOptions): Prom
     if (shuttingDown) return;
     shuttingDown = true;
     log.info({ signal }, "Shutdown signal — draining connections");
-    void sseTransport?.close().catch(() => {});
+    for (const t of httpSessions.values()) void t.close().catch(() => {});
+    httpSessions.clear();
     httpServer.close((err) => {
       if (err) log.error({ err }, "Error closing HTTP server");
       void Promise.resolve(onShutdown?.()).finally(() => process.exit(err ? 1 : 0));
@@ -714,14 +759,13 @@ export async function serve({ config, log, db, onShutdown }: ServeOptions): Prom
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   process.once("SIGINT", () => shutdown("SIGINT"));
 
-  if (transport === "stdio") {
-    log.info({ transport: "stdio" }, "MCP server starting");
-    await mcpServer.connect(new StdioServerTransport());
+  // ── stdio transport (optional) ──────────────────────────────────────────
+  if (enableStdio) {
+    const stdioServer = createMcpServer(db, log);
+    log.info({ transport: mode }, "MCP stdio transport connecting");
+    await stdioServer.connect(new StdioServerTransport());
   } else {
-    log.info(
-      { transport: "sse", url: `http://${config.HOST}:${config.PORT}/mcp` },
-      "MCP SSE listening",
-    );
+    log.info({ transport: mode }, "MCP over HTTP only (stdio disabled)");
   }
 }
 

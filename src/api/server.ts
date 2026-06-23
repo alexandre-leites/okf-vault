@@ -247,28 +247,36 @@ export function createApiServer({ config, log, db }: ApiServerOptions): OpenAPIH
     },
   });
 
-  app.use("*", correlationId);
+  // The MCP Streamable HTTP endpoint hijacks the raw Node response, so the
+  // standard Hono middleware (logger, correlation id, CORS) must NOT run on it
+  // — otherwise they re-materialize a Response and Node throws
+  // ERR_HTTP_HEADERS_SENT on the second write.
+  const skipMcp =
+    (mw: import("hono").MiddlewareHandler): import("hono").MiddlewareHandler =>
+    (c, next) =>
+      c.req.path === "/mcp" ? next() : mw(c, next);
+
+  app.use("*", skipMcp(correlationId));
 
   const allowedOrigins = parseCorsOrigins(config.CORS_ORIGINS);
   if (allowedOrigins.length > 0) {
     app.use(
       "*",
-      cors({
-        origin:
-          allowedOrigins.length === 1 && allowedOrigins[0] === "*"
-            ? "*"
-            : (origin) => (allowedOrigins.includes(origin) ? origin : null),
-        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allowHeaders: ["Content-Type", "Authorization"],
-        maxAge: 86400,
-      }),
+      skipMcp(
+        cors({
+          origin:
+            allowedOrigins.length === 1 && allowedOrigins[0] === "*"
+              ? "*"
+              : (origin) => (allowedOrigins.includes(origin) ? origin : null),
+          allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+          allowHeaders: ["Content-Type", "Authorization"],
+          maxAge: 86400,
+        }),
+      ),
     );
   }
 
-  app.use(
-    "*",
-    httpLogger((message, ...rest) => log.info({ msg: message }, ...rest)),
-  );
+  app.use("*", skipMcp(httpLogger((message, ...rest) => log.info({ msg: message }, ...rest))));
 
   const rateLimiter = new RateLimiter(config.RATE_LIMIT_RPS);
   app.use("/okf/*", async (c, next) => {

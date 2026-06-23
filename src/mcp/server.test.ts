@@ -301,7 +301,7 @@ suite("MCP server", () => {
       uri: `okf://${slug}/mcp/subdir/resource-concept`,
     });
     expect(result.contents).toHaveLength(1);
-    const content = result.contents[0]!;
+    const content = result.contents[0] as { mimeType?: string; text: string };
     expect(content.mimeType).toBe("text/markdown");
     expect(content.text).toContain("type: Reference");
     expect(content.text).toContain("https://example.com/doc");
@@ -384,13 +384,14 @@ suite("MCP server", () => {
     expect(data.deleted).toBe(slug);
   });
 
-  it("okf_concept_get returns error on deleted concept", async () => {
-    const result = await client.callTool({
-      name: "okf_concept_get",
-      arguments: { bundle: slug, path: "mcp/subdir/test-concept" },
+  it("okf_concept_get returns a structured error envelope on deleted concept", async () => {
+    const data = await callTool(client, "okf_concept_get", {
+      bundle: slug,
+      path: "mcp/subdir/test-concept",
     });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]).toMatchObject({ type: "text" });
+    expect(data.status).toBe("error");
+    expect(data.error_code).toBe("NOT_FOUND");
+    expect(data.system_directive).toBeDefined();
   });
 
   // ── serve() startup and shutdown ──────────────────────────────────────
@@ -476,6 +477,78 @@ suite("MCP server", () => {
     exitMock.mockRestore();
   });
 
+  it("serve mounts the Streamable HTTP /mcp endpoint and handles requests", async () => {
+    for (const sig of ["SIGTERM", "SIGINT"] as const) {
+      for (const h of process.listeners(sig)) process.removeListener(sig, h);
+    }
+    const exitMock = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+
+    // Reserve a free port, then release it for the server to bind.
+    const net = await import("node:net");
+    const port = await new Promise<number>((resolve) => {
+      const srv = net.createServer();
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address();
+        const p = typeof addr === "object" && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+    });
+
+    const { serve } = await import("./server.js");
+    const log = createLogger({ LOG_LEVEL: "silent", LOG_PRETTY: false });
+
+    await serve({
+      config: {
+        DATABASE_URL: url!,
+        HOST: "127.0.0.1",
+        PORT: port,
+        LOG_LEVEL: "silent",
+        LOG_PRETTY: false,
+        CORS_ORIGINS: "",
+        API_KEY: "",
+        MAX_BODY_SIZE: 1048576,
+        RATE_LIMIT_RPS: 1000,
+        MCP_TRANSPORT: "http",
+      },
+      log,
+      db: handle.db,
+      onShutdown: vi.fn(),
+    });
+
+    const base = `http://127.0.0.1:${port}/mcp`;
+
+    // GET without a session id → 400 (no valid session branch).
+    const noSession = await fetch(base, { method: "GET" });
+    expect(noSession.status).toBe(400);
+
+    // POST initialize → creates a session and returns an mcp-session-id header.
+    const init = await fetch(base, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0.0" },
+        },
+      }),
+    });
+    expect(init.status).toBeLessThan(500);
+    expect(init.headers.get("mcp-session-id")).toBeTruthy();
+
+    process.emit("SIGTERM" as NodeJS.Signals);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(exitMock).toHaveBeenCalled();
+
+    exitMock.mockRestore();
+  });
+
   // ── Prompts ─────────────────────────────────────────────────────────────
 
   it("getPrompt returns the create_concept prompt", async () => {
@@ -491,8 +564,9 @@ suite("MCP server", () => {
     const msg = result.messages[0]!;
     expect(msg.role).toBe("user");
     expect(msg.content.type).toBe("text");
-    expect(msg.content.text).toContain(slug);
-    expect(msg.content.text).toContain("guides/deploy");
-    expect(msg.content.text).toContain("Playbook");
+    const text = msg.content.type === "text" ? msg.content.text : "";
+    expect(text).toContain(slug);
+    expect(text).toContain("guides/deploy");
+    expect(text).toContain("Playbook");
   });
 });
