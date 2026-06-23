@@ -27,9 +27,13 @@ interface ToolResult {
   content: { type: "text"; text: string }[];
 }
 
+const DIRECTIVE_MARKER = "\n\n### IMPORTANT SYSTEM DIRECTIVE ###";
+
 async function callTool(client: Client, name: string, args: Record<string, unknown>) {
   const result = (await client.callTool({ name, arguments: args })) as ToolResult;
-  return JSON.parse(result.content[0]!.text);
+  const text = result.content[0]!.text;
+  const idx = text.indexOf(DIRECTIVE_MARKER);
+  return JSON.parse(idx === -1 ? text : text.slice(0, idx));
 }
 
 suite("MCP server", () => {
@@ -84,8 +88,8 @@ suite("MCP server", () => {
     expect(Array.isArray(data.tree)).toBe(true);
   });
 
-  it("okf_concept_create creates a concept in a subdirectory", async () => {
-    const data = await callTool(client, "okf_concept_create", {
+  it("okf_concept_upsert creates a concept in a subdirectory", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/subdir/test-concept",
       type: "reference",
@@ -95,8 +99,8 @@ suite("MCP server", () => {
     expect(data.frontmatter.title).toBe("Test");
   });
 
-  it("okf_concept_create accepts optional resource field", async () => {
-    const data = await callTool(client, "okf_concept_create", {
+  it("okf_concept_upsert accepts optional resource field", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/subdir/resource-concept",
       type: "reference",
@@ -150,19 +154,21 @@ suite("MCP server", () => {
     expect(history.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("okf_concept_update modifies the concept", async () => {
-    const data = await callTool(client, "okf_concept_update", {
+  it("okf_concept_upsert modifies the concept", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/subdir/test-concept",
+      type: "reference",
       title: "Updated",
     });
     expect(data.frontmatter.title).toBe("Updated");
   });
 
-  it("okf_concept_update can set resource field", async () => {
-    const data = await callTool(client, "okf_concept_update", {
+  it("okf_concept_upsert can set resource field", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/subdir/test-concept",
+      type: "reference",
       resource: "https://example.com/updated",
     });
     expect(data.frontmatter.resource).toBe("https://example.com/updated");
@@ -202,7 +208,7 @@ suite("MCP server", () => {
 
   it("okf_concept_search returns snippet in results", async () => {
     // Create a concept with body content so snippet is populated
-    await callTool(client, "okf_concept_create", {
+    await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/snippet-test",
       type: "reference",
@@ -228,8 +234,19 @@ suite("MCP server", () => {
     expect(data.title).toBeNull();
   });
 
-  it("okf_concept_create works with all optional fields", async () => {
-    const data = await callTool(client, "okf_concept_create", {
+  it("okf_bundle_create with the reserved 'global' slug returns the canonical global bundle", async () => {
+    const data = await callTool(client, "okf_bundle_create", { slug: "global" });
+    expect(data.slug).toBe("global");
+  });
+
+  it("okf_bundle_delete refuses to delete the reserved 'global' bundle", async () => {
+    const data = await callTool(client, "okf_bundle_delete", { slug: "global" });
+    expect(data.status).toBe("error");
+    expect(data.error_code).toBe("VALIDATION");
+  });
+
+  it("okf_concept_upsert works with all optional fields", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/full-concept",
       type: "reference",
@@ -243,8 +260,8 @@ suite("MCP server", () => {
     expect(data.frontmatter.tags).toEqual(["a", "b"]);
   });
 
-  it("okf_concept_create works with type only (minimal)", async () => {
-    const data = await callTool(client, "okf_concept_create", {
+  it("okf_concept_upsert works with type only (minimal)", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/minimal-concept",
       type: "reference",
@@ -252,8 +269,8 @@ suite("MCP server", () => {
     expect(data.id).toBe("mcp/minimal-concept");
   });
 
-  it("okf_concept_update can change type and tags", async () => {
-    const data = await callTool(client, "okf_concept_update", {
+  it("okf_concept_upsert can change type and tags", async () => {
+    const data = await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "mcp/full-concept",
       type: "Playbook",
@@ -285,6 +302,92 @@ suite("MCP server", () => {
     expect(Array.isArray(data.results)).toBe(true);
   });
 
+  it("okf_concept_search returns SEARCH_SYNTAX error when terms sanitize to nothing", async () => {
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      must_include: ["()", '"'],
+    });
+    expect(data.status).toBe("error");
+    expect(data.error_code).toBe("SEARCH_SYNTAX");
+    expect(data.system_directive).toBeDefined();
+  });
+
+  it("okf_concept_search clamps a long snippet with an ellipsis", async () => {
+    await callTool(client, "okf_concept_upsert", {
+      bundle: slug,
+      path: "mcp/long-snippet",
+      type: "reference",
+      title: "Long Snippet",
+      body: "supercalifragilistic " + "lorem ipsum dolor sit amet ".repeat(40),
+    });
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      text: "supercalifragilistic",
+    });
+    const match = data.results.find((r: { id: string }) => r.id.endsWith("long-snippet"));
+    expect(match).toBeDefined();
+    expect(match.snippet.length).toBeLessThanOrEqual(320);
+  });
+
+  it("okf_concept_search clamps a long snippet that has no word boundary", async () => {
+    await callTool(client, "okf_concept_upsert", {
+      bundle: slug,
+      path: "mcp/nospace-snippet",
+      type: "reference",
+      title: "Nospace",
+      body: "zzqqxx" + "a".repeat(400),
+    });
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      text: "zzqqxx",
+    });
+    const match = data.results.find((r: { id: string }) => r.id.endsWith("nospace-snippet"));
+    expect(match).toBeDefined();
+    expect(match.snippet.length).toBeLessThanOrEqual(320);
+  });
+
+  it("okf_concept_search with include_global=false skips the global fold-in", async () => {
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      text: "Updated",
+      include_global: false,
+    });
+    expect(data.status).toBe("success");
+    expect(Array.isArray(data.results)).toBe(true);
+  });
+
+  it("okf_concept_search with include_global=true folds in global results", async () => {
+    const data = await callTool(client, "okf_concept_search", {
+      bundle: slug,
+      text: "Updated",
+      include_global: true,
+    });
+    expect(data.status).toBe("success");
+    expect(Array.isArray(data.results)).toBe(true);
+  });
+
+  it("okf_concept_get resolves a concept by its okf:// link", async () => {
+    const data = await callTool(client, "okf_concept_get", {
+      link: `okf://${slug}/mcp/subdir/resource-concept`,
+    });
+    expect(data.id).toBe("mcp/subdir/resource-concept");
+  });
+
+  it("okf_concept_links returns an empty array for a concept with no links", async () => {
+    await callTool(client, "okf_concept_upsert", {
+      bundle: slug,
+      path: "mcp/no-links",
+      type: "reference",
+      title: "No Links",
+      body: "Plain body without any references.",
+    });
+    const links = await callTool(client, "okf_concept_links", {
+      bundle: slug,
+      path: "mcp/no-links",
+    });
+    expect(links).toEqual([]);
+  });
+
   // ── Resource template ───────────────────────────────────────────────────
 
   it("listResources enumerates concepts as okf:// resources", async () => {
@@ -308,7 +411,7 @@ suite("MCP server", () => {
   });
 
   it("okf_concept_links returns extracted links", async () => {
-    await callTool(client, "okf_concept_create", {
+    await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "linking-concept",
       type: "reference",
@@ -324,7 +427,7 @@ suite("MCP server", () => {
   });
 
   it("okf_concept_backlinks finds inbound references", async () => {
-    await callTool(client, "okf_concept_create", {
+    await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "linked-target",
       type: "reference",
@@ -338,9 +441,10 @@ suite("MCP server", () => {
   });
 
   it("okf_concept_history lists versions after update", async () => {
-    await callTool(client, "okf_concept_update", {
+    await callTool(client, "okf_concept_upsert", {
       bundle: slug,
       path: "linking-concept",
+      type: "reference",
       title: "Updated Links Out",
       body: "New body after update",
     });

@@ -53,6 +53,13 @@ describe("loadConfig", () => {
     expect(loadConfig({ PORT: 9999 }).PORT).toBe(9999);
   });
 
+  it("applies string CLI rawOverrides and skips undefined-valued ones", () => {
+    process.env["OKFVAULT_CONFIG"] = "/nonexistent/okfvault.json";
+    delete process.env["PORT"];
+    const cfg = loadConfig({}, { PORT: "7777", HOST: undefined as unknown as string });
+    expect(cfg.PORT).toBe(7777);
+  });
+
   it("throws on invalid config values", () => {
     process.env["PORT"] = "not-a-number";
     process.env["OKFVAULT_CONFIG"] = "/nonexistent/okfvault.json";

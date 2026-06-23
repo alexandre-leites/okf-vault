@@ -8,7 +8,13 @@ import { createServices } from "../services/factory.js";
 import { serializeConcept } from "../services/okf-document.js";
 import { pathsBySubtree } from "../services/paths-by-subtree.js";
 import { conceptTypeGuide } from "../domain/concept-types.js";
-import { json, runTool, resolveConceptAddress, toToolError } from "./tool-helpers.js";
+import {
+  json,
+  jsonWithDirective,
+  runTool,
+  resolveConceptAddress,
+  toToolError,
+} from "./tool-helpers.js";
 import { SearchQuerySyntaxError } from "../services/search-query.js";
 import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -24,6 +30,12 @@ const BUNDLE_NAMING_GUIDANCE =
   "Bundle naming: use 'global' for knowledge NOT tied to a specific project (user preferences, " +
   "cross-cutting standards, general facts). For project-specific knowledge, use the git repository " +
   "name or project name as the bundle (e.g. 'okf-vault'). The 'global' bundle always exists.";
+
+const TRIGGER_RULES =
+  " TRIGGER RULES: You MUST execute 'okf_concept_upsert' autonomously immediately after " +
+  "successfully completing a complex multi-step task. Consolidate the key decisions made during " +
+  "the current interaction and save them before replying to the user. Also run this with long " +
+  "conversations from time to time if necessary.";
 
 const BUNDLE_DESC =
   "Root bundle slug. Use 'global' for cross-project knowledge, or the git repo / project name for " +
@@ -65,14 +77,15 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "List bundles",
       description:
         "List all top-level knowledge bundles (slug, title, description). Use this to discover " +
-        "which bundles exist before indexing or searching.",
+        "which bundles exist before indexing or searching." +
+        TRIGGER_RULES,
       inputSchema: {},
     },
     async () =>
       runTool(async () => {
         log.debug("MCP okf_bundle_list");
         const rows = await bundles.list();
-        return json(
+        return jsonWithDirective(
           rows.map((b) => ({ slug: b.slug, title: b.title, description: b.description })),
         );
       }),
@@ -85,7 +98,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       description:
         "Create a top-level knowledge bundle (a namespace for related concepts). Note: writing a " +
         "concept with okf_concept_upsert auto-creates intermediate directories, so you rarely need " +
-        "this unless seeding a brand-new root namespace.",
+        "this unless seeding a brand-new root namespace." +
+        TRIGGER_RULES,
       inputSchema: {
         slug: z
           .string()
@@ -114,7 +128,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Delete bundle",
       description:
         "DESTRUCTIVE. Soft-delete a bundle and ALL of its concepts. Avoid in the append/update " +
-        "memory model — prefer updating concepts via okf_concept_upsert. Use only on explicit request.",
+        "memory model — prefer updating concepts via okf_concept_upsert. Use only on explicit request." +
+        TRIGGER_RULES,
       inputSchema: { slug: z.string().describe("Slug of the bundle to soft-delete.") },
     },
     async ({ slug }) =>
@@ -131,7 +146,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Bundle index",
       description:
         "List the directory structure of a bundle. Use this when you need to understand the " +
-        "hierarchy of stored concepts before searching. Returns a tree of titles/links, not bodies.",
+        "hierarchy of stored concepts before searching. Returns a tree of titles/links, not bodies." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z
@@ -144,7 +160,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       runTool(async () => {
         log.debug({ bundle, path }, "MCP okf_bundle_index");
         const segments = [bundle, ...(path ?? "").split("/")].filter(Boolean);
-        return json(await indexer.index(segments));
+        return jsonWithDirective(await indexer.index(segments));
       }),
   );
 
@@ -158,7 +174,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
         "established projects, or personal preferences before answering. " +
         "Returns a lightweight list of matches (link, title, summary snippet) — NOT full " +
         "documents. Pick the most relevant 'link' and call okf_concept_get to read its full content. " +
-        BUNDLE_NAMING_GUIDANCE,
+        BUNDLE_NAMING_GUIDANCE +
+        TRIGGER_RULES,
       inputSchema: {
         must_include: z
           .array(z.string())
@@ -246,14 +263,14 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
           ...(offset !== undefined ? { offset } : {}),
         });
         if (results.length === 0) {
-          return json({
+          return jsonWithDirective({
             status: "success",
             results: [],
             system_directive:
               "0 results found. If you passed 'must_include', retry the search using 'should_include' to broaden the scope. If the user provided new information, use 'okf_concept_upsert' to store it.",
           });
         }
-        return json({
+        return jsonWithDirective({
           status: "success",
           results,
           system_directive:
@@ -280,7 +297,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       description:
         "Fetch the FULL markdown of ONE concept. This is step 2 of the search→get loop: call it " +
         "after okf_concept_search to hydrate a result you selected. Accepts the search result's " +
-        "'link' (okf:// URI) OR an explicit bundle + path.",
+        "'link' (okf:// URI) OR an explicit bundle + path." +
+        TRIGGER_RULES,
       inputSchema: {
         link: z
           .string()
@@ -309,89 +327,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
           "\n\n[System Note: If any of this retrieved information is now outdated based on the user's latest prompt, immediately use 'okf_concept_upsert' to update it.]";
         // Return metadata + rendered markdown; omit the duplicate raw `body`.
         const { id, scope, frontmatter } = concept;
-        return json({ id, scope, frontmatter, markdown });
-      }),
-  );
-
-  server.registerTool(
-    "okf_concept_create",
-    {
-      title: "Create concept",
-      description:
-        "DEPRECATED — prefer okf_concept_upsert (it creates if absent, updates if present, and " +
-        "snapshots history). Only use this if you specifically need creation to FAIL on an existing path.",
-      inputSchema: {
-        bundle: z.string().describe(BUNDLE_DESC),
-        path: z.string().describe(PATH_DESC),
-        type: z.string().min(1).max(200).describe(TYPE_FIELD_DESCRIPTION),
-        title: z.string().max(500).optional().describe("Display title."),
-        description: z.string().max(2000).optional().describe("One-line summary."),
-        resource: z
-          .string()
-          .max(2000)
-          .optional()
-          .describe("Source/reference URI for this concept."),
-        tags: z.array(z.string().max(200)).optional().describe("Lowercase keyword tags."),
-        body: z.string().max(1_048_576).optional().describe("Markdown body content."),
-      },
-    },
-    async ({ bundle, path, type, title, description, resource, tags, body }) =>
-      runTool(async () => {
-        log.debug({ bundle, path }, "MCP okf_concept_create");
-        return json(
-          await concepts.create(bundle, path, {
-            type,
-            ...(title !== undefined ? { title } : {}),
-            ...(description !== undefined ? { description } : {}),
-            ...(resource !== undefined ? { resource } : {}),
-            ...(tags !== undefined ? { tags } : {}),
-            ...(body !== undefined ? { body } : {}),
-          }),
-        );
-      }),
-  );
-
-  server.registerTool(
-    "okf_concept_update",
-    {
-      title: "Update concept",
-      description:
-        "DEPRECATED — prefer okf_concept_upsert. Only use this if you specifically need the update " +
-        "to FAIL when the concept does not already exist.",
-      inputSchema: {
-        bundle: z.string().describe(BUNDLE_DESC),
-        path: z.string().describe(PATH_DESC),
-        type: z.string().max(200).optional().describe(TYPE_FIELD_DESCRIPTION),
-        title: z.string().max(500).optional().describe("Display title."),
-        description: z.string().max(2000).optional().describe("One-line summary."),
-        resource: z
-          .string()
-          .max(2000)
-          .optional()
-          .describe("Source/reference URI for this concept."),
-        tags: z.array(z.string().max(200)).optional().describe("Lowercase keyword tags."),
-        body: z.string().max(1_048_576).optional().describe("Markdown body content."),
-      },
-    },
-    async ({ bundle, path, type, title, description, resource, tags, body }) =>
-      runTool(async () => {
-        log.debug({ bundle, path }, "MCP okf_concept_update");
-        const current = await concepts.read(bundle, path);
-        return json(
-          await concepts.update(
-            bundle,
-            path,
-            {
-              ...current.frontmatter,
-              ...(type !== undefined ? { type } : {}),
-              ...(title !== undefined ? { title } : {}),
-              ...(description !== undefined ? { description } : {}),
-              ...(resource !== undefined ? { resource } : {}),
-              ...(tags !== undefined ? { tags } : {}),
-            },
-            body ?? current.body,
-          ),
-        );
+        return jsonWithDirective({ id, scope, frontmatter, markdown });
       }),
   );
 
@@ -400,11 +336,14 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     {
       title: "Upsert concept",
       description:
-        "Store a new fact, architectural rule, or user preference in long-term memory. " +
-        "Use this IMMEDIATELY when the user provides new information that should be remembered " +
-        "for future sessions. Never say 'I will remember this' without executing this tool. " +
-        "Creates the concept if it does not exist, otherwise updates it (saving a version snapshot). " +
-        BUNDLE_NAMING_GUIDANCE,
+        "Store or update a verified fact, preference, procedure, system state, or multi-step " +
+        "behavior in long-term memory. Creates the concept if it does not exist, otherwise updates " +
+        "it (saving a version snapshot). " +
+        BUNDLE_NAMING_GUIDANCE +
+        " TRIGGER RULES: You MUST execute this tool autonomously immediately after successfully " +
+        "completing a complex multi-step task. Consolidate the key decisions made during the " +
+        "current interaction and save them before replying to the user. Also run this with long " +
+        "conversations from time to time if necessary.",
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -442,7 +381,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Delete concept",
       description:
         "DESTRUCTIVE. Soft-delete a single concept. Avoid in the append/update memory model — " +
-        "prefer correcting content via okf_concept_upsert. Use only on explicit request.",
+        "prefer correcting content via okf_concept_upsert. Use only on explicit request." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -498,7 +438,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Concept links",
       description:
         "List outbound OKF references in a concept's body (okf:// URIs and relative paths). Use to " +
-        "traverse the knowledge graph forward from a concept you are reading.",
+        "traverse the knowledge graph forward from a concept you are reading." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -518,7 +459,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
         while ((m = relRe.exec(concept.body)) !== null) {
           if (m[2]) links.push(m[2].replace(/\.md$/, ""));
         }
-        return json([...new Set(links)]);
+        return jsonWithDirective([...new Set(links)]);
       }),
   );
 
@@ -528,7 +469,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Concept backlinks",
       description:
         "Find concepts in the same bundle whose body references the given concept path. Use to " +
-        "traverse the knowledge graph backward (what depends on / mentions this concept).",
+        "traverse the knowledge graph backward (what depends on / mentions this concept)." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -555,7 +497,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
             });
           }
         }
-        return json(results);
+        return jsonWithDirective(results);
       }),
   );
 
@@ -565,7 +507,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Concept history",
       description:
         "List saved version snapshots of a concept (most recent first). Use to see how a concept " +
-        "changed over time before reading a specific version with okf_concept_read_version.",
+        "changed over time before reading a specific version with okf_concept_read_version." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -574,7 +517,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     async ({ bundle, path }) =>
       runTool(async () => {
         log.debug({ bundle, path }, "MCP okf_concept_history");
-        return json(await concepts.listVersions(bundle, path));
+        return jsonWithDirective(await concepts.listVersions(bundle, path));
       }),
   );
 
@@ -584,7 +527,8 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
       title: "Read concept version",
       description:
         "Read a specific historical version of a concept by version number (obtain numbers from " +
-        "okf_concept_history).",
+        "okf_concept_history)." +
+        TRIGGER_RULES,
       inputSchema: {
         bundle: z.string().describe(BUNDLE_DESC),
         path: z.string().describe(PATH_DESC),
@@ -594,7 +538,7 @@ export function createMcpServer(db: Database, log: Logger): McpServer {
     async ({ bundle, path, version }) =>
       runTool(async () => {
         log.debug({ bundle, path, version }, "MCP okf_concept_read_version");
-        return json(await concepts.readVersion(bundle, path, version));
+        return jsonWithDirective(await concepts.readVersion(bundle, path, version));
       }),
   );
 

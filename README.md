@@ -100,8 +100,6 @@ Interactive docs at `/docs`; OpenAPI spec at `/openapi.json`.
 | `okf_concept_backlinks`    | Concepts referencing a given concept                                 |
 | `okf_concept_history`      | List a concept's version snapshots                                   |
 | `okf_concept_read_version` | Read a specific historical version                                   |
-| `okf_concept_create`       | _Deprecated — prefer `okf_concept_upsert`_                           |
-| `okf_concept_update`       | _Deprecated — prefer `okf_concept_upsert`_                           |
 | `okf_bundle_delete`        | _Destructive — soft-delete a bundle and its concepts_                |
 | `okf_concept_delete`       | _Destructive — soft-delete a concept_                                |
 

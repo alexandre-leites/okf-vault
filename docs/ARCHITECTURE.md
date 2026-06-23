@@ -147,7 +147,7 @@ A resource template `okf://{bundle}/{path+}` resolves concept paths to OKF markd
 
 ### Prompts
 
-The `create_concept` prompt takes `bundle`, `path`, and `type` arguments and returns a user message guiding the agent to use `okf_concept_create` with correct parameters.
+The `create_concept` prompt takes `bundle`, `path`, and `type` arguments and returns a user message guiding the agent to use `okf_concept_upsert` with correct parameters.
 
 ## Configuration (`src/config.ts`)
 
